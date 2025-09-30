@@ -26,7 +26,7 @@ type VerifyingKey struct {
 		Beta, Delta, Gamma bn254.G2Affine
 	}
 
-	CommitmentKey  pedersen.Key
+	CommitmentKey  pedersen.VerifyingKey
 	CommitmentInfo constraint.Commitment // since the verifier doesn't input a constraint system, this needs to be provided here
 }
 
@@ -62,6 +62,9 @@ func (vk *VerifyingKey) writeTo(w io.Writer) (int64, error) {
 }
 
 func extractPK(phase2Path string) error {
+	// Derive evals file path from phase2Path
+	evalsPath := phase2Path[:len(phase2Path)-4] + ".evals"
+
 	// Phase 2 file
 	phase2File, err := os.Open(phase2Path)
 	if err != nil {
@@ -70,7 +73,7 @@ func extractPK(phase2Path string) error {
 	defer phase2File.Close()
 
 	// Evaluations
-	evalsFile, err := os.Open("evals")
+	evalsFile, err := os.Open(evalsPath)
 	if err != nil {
 		return err
 	}
@@ -229,6 +232,9 @@ func extractPK(phase2Path string) error {
 }
 
 func extractVK(phase2Path string) error {
+	// Derive evals file path from phase2Path
+	evalsPath := phase2Path[:len(phase2Path)-4] + ".evals"
+
 	vk := VerifyingKey{}
 	// Phase 2 file
 	phase2File, err := os.Open(phase2Path)
@@ -238,7 +244,7 @@ func extractVK(phase2Path string) error {
 	defer phase2File.Close()
 
 	// Evaluations
-	evalsFile, err := os.Open("evals")
+	evalsFile, err := os.Open(evalsPath)
 	if err != nil {
 		return err
 	}
@@ -308,7 +314,9 @@ func extractVK(phase2Path string) error {
 	if err := decEvals.Decode(&ckk); err != nil {
 		return err
 	}
-	vk.CommitmentKey, err = pedersen.Setup(ckk)
+	// Convert to [][]G1Affine format expected by new API
+	ckkSlices := [][]bn254.G1Affine{ckk}
+	_, vk.CommitmentKey, err = pedersen.Setup(ckkSlices)
 	if err != nil {
 		return err
 	}

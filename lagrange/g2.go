@@ -135,7 +135,8 @@ func ConvertG2(buff []bn254.G2Affine, domain *fft.Domain) {
 		jac[i].FromAffine(&buff[i])
 	}
 
-	difFFTG2(jac, domain.TwiddlesInv, 0, maxSplits, nil)
+	twiddlesInv, _ := domain.TwiddlesInv()
+	difFFTG2(jac, twiddlesInv, 0, maxSplits, nil)
 	bitReversePointsG2(jac)
 	var invBigint big.Int
 	domain.CardinalityInv.BigInt(&invBigint)

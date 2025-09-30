@@ -18,7 +18,7 @@ func lagrangeG1(phase1File, lagFile *os.File, position int64, domain *fft.Domain
 	reader := bufio.NewReader(phase1File)
 	writer := bufio.NewWriter(lagFile)
 	defer writer.Flush()
-	dec := bn254.NewDecoder(reader)
+	dec := bn254.NewDecoder(reader, bn254.NoSubgroupChecks())
 	enc := bn254.NewEncoder(writer)
 
 	size := int(domain.Cardinality)
@@ -46,7 +46,7 @@ func lagrangeG2(phase1File, lagFile *os.File, position int64, domain *fft.Domain
 	reader := bufio.NewReader(phase1File)
 	writer := bufio.NewWriter(lagFile)
 	defer writer.Flush()
-	dec := bn254.NewDecoder(reader)
+	dec := bn254.NewDecoder(reader, bn254.NoSubgroupChecks())
 	enc := bn254.NewEncoder(writer)
 
 	size := int(domain.Cardinality)

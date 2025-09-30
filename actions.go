@@ -5,7 +5,7 @@ import (
 	"strconv"
 
 	"github.com/urfave/cli/v2"
-	deserializer "github.com/worldcoin/ptau-deserializer/deserialize"
+	deserializer "github.com/lightprotocol/ptau-deserializer/deserialize"
 	"github.com/worldcoin/semaphore-mtb-setup/keys"
 	"github.com/worldcoin/semaphore-mtb-setup/phase1"
 	"github.com/worldcoin/semaphore-mtb-setup/phase2"
@@ -68,21 +68,13 @@ func p1i(cCtx *cli.Context) error {
 	ptauFilePath := cCtx.Args().Get(0)
 	outputFilePath := cCtx.Args().Get(1)
 
-	ptau, err := deserializer.ReadPtau(ptauFilePath)
-
+	ptauFile, err := deserializer.InitPtau(ptauFilePath)
 	if err != nil {
 		return err
 	}
 
-	phase1, err := deserializer.ConvertPtauToPhase1(ptau)
-
-	if err != nil {
-		return err
-	}
-
-	// Write phase1 to file
-	err = deserializer.WritePhase1(phase1, uint8(ptau.Header.Power), outputFilePath)
-
+	// Write phase1 to file using the ptauFile
+	err = deserializer.WritePhase1FromPtauFile(ptauFile, outputFilePath)
 	if err != nil {
 		return err
 	}

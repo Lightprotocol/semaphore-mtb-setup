@@ -5,7 +5,7 @@
         #Contributions          <2 bytes>
     }
     Parameters                  <192<2ᵖ>+32 bytes>
-    {                           
+    {
         {[τ]₁}                  <32(2²ᵖ-1) bytes>
         {[ατ]₁}                 <32(2ᴾ) bytes>
         {[βτ]₁}                 <32(2ᴾ) bytes>
@@ -74,7 +74,7 @@ The main objective is to reduce the storage/bandwidth cost for phase 2 contribut
 
 # Phase 2 Evaluation File Format for *.ev
 
-    Evaluation 
+    Evaluation
     {
         [α]₁                    <32 bytes>
         [β]₁                    <32 bytes>

@@ -37,7 +37,9 @@ func Initialize(phase1Path, r1csPath, phase2Path string) error {
 	}
 
 	// 3. Process evaluation
-	if err := processEvaluations(header1, header2, r1csPath, phase1File); err != nil {
+	// Generate circuit-specific evals file by replacing .ph2 extension with .evals
+	evalsPath := phase2Path[:len(phase2Path)-4] + ".evals"
+	if err := processEvaluations(header1, header2, r1csPath, phase1File, evalsPath); err != nil {
 		return err
 	}
 
@@ -47,7 +49,7 @@ func Initialize(phase1Path, r1csPath, phase2Path string) error {
 	}
 
 	// Process parameters
-	if err := processPVCKK(header1, header2, r1csPath, phase2File); err != nil {
+	if err := processPVCKK(header1, header2, r1csPath, phase2File, evalsPath); err != nil {
 		return err
 	}
 

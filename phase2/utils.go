@@ -62,14 +62,24 @@ func processHeader(r1csPath string, phase1File, phase2File *os.File) (*phase1.He
 		return nil, nil, fmt.Errorf("phase 1 parameters can support up to %d, but the circuit #Constraints are %d", N, header2.Constraints)
 	}
 	// Initialize Domain, #Wires, #Witness, #Public, #PrivateCommitted
-	header2.Wires = r1cs.NbInternalVariables + r1cs.GetNbPublicVariables() + r1cs.GetNbSecretVariables()
-	header2.PrivateCommitted = r1cs.CommitmentInfo.NbPrivateCommitted
-	header2.Public = r1cs.GetNbPublicVariables()
-	header2.Witness = r1cs.GetNbSecretVariables() + r1cs.NbInternalVariables - header2.PrivateCommitted
+	header2.Wires = r1cs.GetNbInternalVariables() + r1cs.GetNbPublicVariables() + r1cs.GetNbSecretVariables()
 
-	if r1cs.CommitmentInfo.Is() { // the commitment itself is defined by a hint so the prover considers it private
-		header2.Public++  // but the verifier will need to inject the value itself so on the groth16
-		header2.Witness-- // level it must be considered public
+	// Calculate private committed variables from commitments
+	commitments := r1cs.GetCommitments()
+	header2.PrivateCommitted = 0
+	if groth16Commitments, ok := commitments.(constraint.Groth16Commitments); ok {
+		for _, commitment := range groth16Commitments {
+			header2.PrivateCommitted += len(commitment.PrivateCommitted)
+		}
+	}
+
+	header2.Public = r1cs.GetNbPublicVariables()
+	header2.Witness = r1cs.GetNbSecretVariables() + r1cs.GetNbInternalVariables() - header2.PrivateCommitted
+
+	// Check if there are any commitments
+	if len(commitments.CommitmentIndexes()) > 0 {
+		header2.Public++  // the commitment itself is considered public on the groth16 level
+		header2.Witness-- // but private on the prover level
 	}
 
 	// Write header of phase 2
@@ -122,7 +132,7 @@ func processLagrange(header1 *phase1.Header, header2 *Header, phase1File, phase2
 	return nil
 }
 
-func processEvaluations(header1 *phase1.Header, header2 *Header, r1csPath string, phase1File *os.File) error {
+func processEvaluations(header1 *phase1.Header, header2 *Header, r1csPath string, phase1File *os.File, evalsPath string) error {
 	fmt.Println("Processing evaluation of [A]₁, [B]₁, [B]₂")
 
 	lagFile, err := os.Open("srs.lag")
@@ -131,7 +141,7 @@ func processEvaluations(header1 *phase1.Header, header2 *Header, r1csPath string
 	}
 	defer lagFile.Close()
 
-	evalFile, err := os.Create("evals")
+	evalFile, err := os.Create(evalsPath)
 	if err != nil {
 		return err
 	}
@@ -169,14 +179,15 @@ func processEvaluations(header1 *phase1.Header, header2 *Header, r1csPath string
 	}
 
 	// Deserialize Lagrange SRS TauG1
-	dec := bn254.NewDecoder(lagFile)
+	dec := bn254.NewDecoder(lagFile, bn254.NoSubgroupChecks())
 	if err := dec.Decode(&tauG1); err != nil {
 		return err
 	}
 
 	// Accumlate {[A]₁}
 	buff := make([]bn254.G1Affine, header2.Wires)
-	for i, c := range r1cs.Constraints {
+	constraints := r1cs.GetR1Cs()
+	for i, c := range constraints {
 		for _, t := range c.L {
 			accumulateG1(&r1cs, &buff[t.WireID()], t, &tauG1[i])
 		}
@@ -189,7 +200,7 @@ func processEvaluations(header1 *phase1.Header, header2 *Header, r1csPath string
 	// Reset buff
 	buff = make([]bn254.G1Affine, header2.Wires)
 	// Accumlate {[B]₁}
-	for i, c := range r1cs.Constraints {
+	for i, c := range constraints {
 		for _, t := range c.R {
 			accumulateG1(&r1cs, &buff[t.WireID()], t, &tauG1[i])
 		}
@@ -213,7 +224,7 @@ func processEvaluations(header1 *phase1.Header, header2 *Header, r1csPath string
 		return err
 	}
 	// Accumlate {[B]₂}
-	for i, c := range r1cs.Constraints {
+	for i, c := range constraints {
 		for _, t := range c.R {
 			accumulateG2(&r1cs, &buff2[t.WireID()], t, &tauG2[i])
 		}
@@ -247,7 +258,7 @@ func processDeltaAndZ(header1 *phase1.Header, header2 *Header, phase1File, phase
 		return err
 	}
 	reader := bufio.NewReader(phase1File)
-	dec := bn254.NewDecoder(reader)
+	dec := bn254.NewDecoder(reader, bn254.NoSubgroupChecks())
 
 	n := header2.Domain
 	tauG1 := make([]bn254.G1Affine, 2*n-1)
@@ -273,7 +284,7 @@ func processDeltaAndZ(header1 *phase1.Header, header2 *Header, phase1File, phase
 	return nil
 }
 
-func processPVCKK(header1 *phase1.Header, header2 *Header, r1csPath string, phase2File *os.File) error {
+func processPVCKK(header1 *phase1.Header, header2 *Header, r1csPath string, phase2File *os.File, evalsPath string) error {
 	fmt.Println("Processing PKK, VKK, and CKK")
 	lagFile, err := os.Open("srs.lag")
 	if err != nil {
@@ -292,11 +303,12 @@ func processPVCKK(header1 *phase1.Header, header2 *Header, r1csPath string, phas
 		return err
 	}
 
+	constraints := r1cs.GetR1Cs()
 	var buffSRS []bn254.G1Affine
 	reader := bufio.NewReader(lagFile)
 	writer := bufio.NewWriter(phase2File)
 	defer writer.Flush()
-	dec := bn254.NewDecoder(reader)
+	dec := bn254.NewDecoder(reader, bn254.NoSubgroupChecks())
 	enc := bn254.NewEncoder(writer)
 
 	// L = O(TauG1) + R(AlphaTauG1) + L(BetaTauG1)
@@ -307,7 +319,7 @@ func processPVCKK(header1 *phase1.Header, header2 *Header, r1csPath string, phas
 		return err
 	}
 
-	for i, c := range r1cs.Constraints {
+	for i, c := range constraints {
 		// Output(Tau)
 		for _, t := range c.O {
 			accumulateG1(&r1cs, &L[t.WireID()], t, &buffSRS[i])
@@ -318,7 +330,7 @@ func processPVCKK(header1 *phase1.Header, header2 *Header, r1csPath string, phas
 	if err := dec.Decode(&buffSRS); err != nil {
 		return err
 	}
-	for i, c := range r1cs.Constraints {
+	for i, c := range constraints {
 		// Right(AlphaTauG1)
 		for _, t := range c.R {
 			accumulateG1(&r1cs, &L[t.WireID()], t, &buffSRS[i])
@@ -329,14 +341,15 @@ func processPVCKK(header1 *phase1.Header, header2 *Header, r1csPath string, phas
 	if err := dec.Decode(&buffSRS); err != nil {
 		return err
 	}
-	for i, c := range r1cs.Constraints {
+	for i, c := range constraints {
 		// Left(BetaTauG1)
 		for _, t := range c.L {
 			accumulateG1(&r1cs, &L[t.WireID()], t, &buffSRS[i])
 		}
 	}
 
-	pkk, vkk, ckk := filterL(L, header2, &r1cs.CommitmentInfo)
+	commitments := r1cs.GetCommitments()
+	pkk, vkk, ckk := filterL(L, header2, commitments)
 	// Write PKK
 	for i := 0; i < len(pkk); i++ {
 		if err := enc.Encode(&pkk[i]); err != nil {
@@ -345,7 +358,7 @@ func processPVCKK(header1 *phase1.Header, header2 *Header, r1csPath string, phas
 	}
 
 	// VKK
-	evalFile, err := os.OpenFile("evals", os.O_APPEND|os.O_WRONLY, 0644)
+	evalFile, err := os.OpenFile(evalsPath, os.O_APPEND|os.O_WRONLY, 0644)
 	if err != nil {
 		return err
 	}
@@ -534,15 +547,32 @@ func aggregate(inputDecoder, originDecoder *bn254.Decoder, size int) (*bn254.G1A
 	return &inG, &orG, nil
 }
 
-func filterL(L []bn254.G1Affine, header2 *Header, cmtInfo *constraint.Commitment) ([]bn254.G1Affine, []bn254.G1Affine, []bn254.G1Affine) {
+func filterL(L []bn254.G1Affine, header2 *Header, cmtInfo constraint.Commitments) ([]bn254.G1Affine, []bn254.G1Affine, []bn254.G1Affine) {
 	pkk := make([]bn254.G1Affine, header2.Witness)
 	vkk := make([]bn254.G1Affine, header2.Public)
 	ckk := make([]bn254.G1Affine, header2.PrivateCommitted)
 	vI, cI := 0, 0
+
+	// Build maps for quick lookup
+	commitmentIndexes := make(map[int]bool)
+	for _, idx := range cmtInfo.CommitmentIndexes() {
+		commitmentIndexes[idx] = true
+	}
+
+	privateCommittedMap := make(map[int]bool)
+	if groth16Commitments, ok := cmtInfo.(constraint.Groth16Commitments); ok {
+		for _, commitment := range groth16Commitments {
+			for _, idx := range commitment.PrivateCommitted {
+				privateCommittedMap[idx] = true
+			}
+		}
+	}
+
 	for i := range L {
-		isCommittedPrivate := cI < cmtInfo.NbPrivateCommitted && i == cmtInfo.PrivateCommitted()[i]
-		isCommitment := cmtInfo.Is() && i == cmtInfo.CommitmentIndex
+		isCommittedPrivate := privateCommittedMap[i]
+		isCommitment := commitmentIndexes[i]
 		isPublic := i < header2.Public
+
 		if isCommittedPrivate {
 			ckk[cI].Set(&L[i])
 			cI++
@@ -566,7 +596,7 @@ func readPhase1(phase1File *os.File, power byte) (*bn254.G1Affine, *bn254.G1Affi
 	posBeta1 := posAlpha + 32*N
 	posBeta2 := posBeta1 + 96*N
 
-	dec := bn254.NewDecoder(phase1File)
+	dec := bn254.NewDecoder(phase1File, bn254.NoSubgroupChecks())
 	// Read AlphaG1
 	if _, err := phase1File.Seek(posAlpha, io.SeekStart); err != nil {
 		return nil, nil, nil, err
