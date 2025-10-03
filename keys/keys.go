@@ -11,6 +11,7 @@ import (
 	"github.com/consensys/gnark-crypto/ecc/bn254/fr/fft"
 	"github.com/consensys/gnark-crypto/ecc/bn254/fr/pedersen"
 	"github.com/consensys/gnark/backend/groth16"
+	groth16bn254 "github.com/consensys/gnark/backend/groth16/bn254"
 	"github.com/consensys/gnark/constraint"
 	"github.com/worldcoin/semaphore-mtb-setup/phase2"
 )
@@ -79,7 +80,7 @@ func extractPK(phase2Path string) error {
 	}
 	defer evalsFile.Close()
 
-	// Use buffered IO to write parameters efficiently
+	// Use buffered IO to read parameters efficiently
 	ph2Reader := bufio.NewReader(phase2File)
 	evalsReader := bufio.NewReader(evalsFile)
 
@@ -91,43 +92,27 @@ func extractPK(phase2Path string) error {
 	decPh2 := bn254.NewDecoder(ph2Reader)
 	decEvals := bn254.NewDecoder(evalsReader)
 
-	pkFile, err := os.Create("pk")
-	if err != nil {
-		return err
-	}
-	defer pkFile.Close()
-	pkWriter := bufio.NewWriter(pkFile)
-	defer pkWriter.Flush()
-	encPk := bn254.NewEncoder((pkWriter))
+	// Create gnark ProvingKey structure (concrete type, not interface)
+	pk := &groth16bn254.ProvingKey{}
 
 	var alphaG1, betaG1, deltaG1 bn254.G1Affine
 	var betaG2, deltaG2 bn254.G2Affine
 
-	// 0. Write domain
-	domain := fft.NewDomain(uint64(header.Domain))
-	domain.WriteTo(pkWriter)
+	// Set domain
+	pk.Domain = *fft.NewDomain(uint64(header.Domain))
 
-	// 1. Read/Write [α]₁
+	// 1. Read [α]₁
 	if err := decEvals.Decode(&alphaG1); err != nil {
 		return err
 	}
-	if err := encPk.Encode(&alphaG1); err != nil {
-		return err
-	}
 
-	// 2. Read/Write [β]₁
+	// 2. Read [β]₁
 	if err := decEvals.Decode(&betaG1); err != nil {
 		return err
 	}
-	if err := encPk.Encode(&betaG1); err != nil {
-		return err
-	}
 
-	// 3. Read/Write [δ]₁
+	// 3. Read [δ]₁
 	if err := decPh2.Decode(&deltaG1); err != nil {
-		return err
-	}
-	if err := encPk.Encode(&deltaG1); err != nil {
 		return err
 	}
 
@@ -140,102 +125,107 @@ func extractPK(phase2Path string) error {
 		return err
 	}
 
-	// 4. Read, Filter, Write A
+	// 4. Read, Filter A
 	var buffG1 []bn254.G1Affine
 	if err := decEvals.Decode(&buffG1); err != nil {
 		return err
 	}
 	buffG1, infinityA, nbInfinityA := filterInfinityG1(buffG1)
-	if err := encPk.Encode(buffG1); err != nil {
-		return err
-	}
 
-	// 5. Read, Filter, Write B
-	if err := decEvals.Decode(&buffG1); err != nil {
+	// 5. Read, Filter B
+	var buffG1B []bn254.G1Affine
+	if err := decEvals.Decode(&buffG1B); err != nil {
 		return err
 	}
-	buffG1, infinityB, nbInfinityB := filterInfinityG1(buffG1)
-	if err := encPk.Encode(buffG1); err != nil {
-		return err
-	}
+	buffG1B, infinityB, nbInfinityB := filterInfinityG1(buffG1B)
 
-	// 6. Read/Write Z
-	buffG1 = make([]bn254.G1Affine, header.Domain)
-	for i := 0; i < header.Domain; i++ {
-		if err := decPh2.Decode(&buffG1[i]); err != nil {
+	// 6. Read Z
+	// gnark's Setup creates Z with size Domain-1
+	buffG1Z := make([]bn254.G1Affine, header.Domain-1)
+	for i := 0; i < header.Domain-1; i++ {
+		if err := decPh2.Decode(&buffG1Z[i]); err != nil {
 			return err
 		}
 	}
-	if err := encPk.Encode(buffG1); err != nil {
+	// Skip the last Z element that ceremony has but gnark doesn't use
+	var skipZ bn254.G1Affine
+	if err := decPh2.Decode(&skipZ); err != nil {
 		return err
 	}
 
-	// 7. Read/Write PKK
-	buffG1 = make([]bn254.G1Affine, header.Witness)
+	// 7. Read PKK
+	buffG1K := make([]bn254.G1Affine, header.Witness)
 	for i := 0; i < header.Witness; i++ {
-		if err := decPh2.Decode(&buffG1[i]); err != nil {
+		if err := decPh2.Decode(&buffG1K[i]); err != nil {
 			return err
 		}
 	}
-	if err := encPk.Encode(buffG1); err != nil {
-		return err
-	}
 
-	// 8. Write [β]₂
-	if err := encPk.Encode(&betaG2); err != nil {
-		return err
-	}
-
-	// 9. Write [δ]₂
-	if err := encPk.Encode(&deltaG2); err != nil {
-		return err
-	}
-
-	// 10. Read, Filter, Write B₂
+	// 10. Read B₂
 	var buffG2 []bn254.G2Affine
 	if err := decEvals.Decode(&buffG2); err != nil {
 		return err
 	}
 	buffG2, _, _ = filterInfinityG2(buffG2)
-	if err := encPk.Encode(buffG2); err != nil {
+
+	// 11. Read commitment key data (like in extractVK)
+	// Skip to commitment key position
+	pos := int64(128*(header.Wires+1) + 12)
+	if _, err := evalsFile.Seek(pos, io.SeekStart); err != nil {
 		return err
 	}
-	buffG2 = nil
+	evalsReader.Reset(evalsFile)
+	decEvals = bn254.NewDecoder(evalsReader)
 
-	// 11. Write nbWires
-	nbWires := uint64(header.Wires)
-	if err := encPk.Encode(&nbWires); err != nil {
-		return err
-	}
-
-	// 12. Write nbInfinityA
-	if err := encPk.Encode(&nbInfinityA); err != nil {
-		return err
-	}
-
-	// 13. Write nbInfinityB
-	if err := encPk.Encode(&nbInfinityB); err != nil {
+	// Skip VKK
+	var vkKTemp []bn254.G1Affine
+	if err := decEvals.Decode(&vkKTemp); err != nil {
 		return err
 	}
 
-	// 14. Write infinityA
-	if err := encPk.Encode(&infinityA); err != nil {
+	// Read CKK (Commitment Key)
+	var ckk []bn254.G1Affine
+	if err := decEvals.Decode(&ckk); err != nil {
 		return err
 	}
 
-	// 15. Write infinityB
-	if err := encPk.Encode(&infinityB); err != nil {
+	// Populate gnark ProvingKey structure with filtered arrays
+	// gnark expects filtered arrays, NOT full arrays!
+	pk.G1.Alpha.Set(&alphaG1)
+	pk.G1.Beta.Set(&betaG1)
+	pk.G1.Delta.Set(&deltaG1)
+	pk.G1.A = buffG1  // Filtered array (no infinity points)
+	pk.G1.B = buffG1B // Filtered array (no infinity points)
+	pk.G1.Z = buffG1Z
+	pk.G1.K = buffG1K
+
+	pk.G2.Beta.Set(&betaG2)
+	pk.G2.Delta.Set(&deltaG2)
+	pk.G2.B = buffG2 // Filtered array (no infinity points)
+
+	// Set infinity masks
+	pk.InfinityA = infinityA
+	pk.InfinityB = infinityB
+	pk.NbInfinityA = nbInfinityA
+	pk.NbInfinityB = nbInfinityB
+	pk.CommitmentKeys = []pedersen.ProvingKey{} // No commitments for our circuits
+
+	// Write to file using gnark's standard WriteTo method
+	pkFile, err := os.Create("pk")
+	if err != nil {
 		return err
 	}
+	defer pkFile.Close()
 
-	return nil
+	// Use WriteTo for compressed format (standard)
+	_, err = pk.WriteTo(pkFile)
+	return err
 }
 
 func extractVK(phase2Path string) error {
 	// Derive evals file path from phase2Path
 	evalsPath := phase2Path[:len(phase2Path)-4] + ".evals"
 
-	vk := VerifyingKey{}
 	// Phase 2 file
 	phase2File, err := os.Open(phase2Path)
 	if err != nil {
@@ -250,7 +240,7 @@ func extractVK(phase2Path string) error {
 	}
 	defer evalsFile.Close()
 
-	// Use buffered IO to write parameters efficiently
+	// Use buffered IO to read parameters efficiently
 	ph2Reader := bufio.NewReader(phase2File)
 	evalsReader := bufio.NewReader(evalsFile)
 
@@ -262,40 +252,37 @@ func extractVK(phase2Path string) error {
 	decPh2 := bn254.NewDecoder(ph2Reader)
 	decEvals := bn254.NewDecoder(evalsReader)
 
-	vkFile, err := os.Create("vk")
-	if err != nil {
-		return err
-	}
-	defer vkFile.Close()
-	vkWriter := bufio.NewWriter(vkFile)
-	defer vkWriter.Flush()
+	// Create gnark VerifyingKey structure (concrete type, not interface)
+	vk := &groth16bn254.VerifyingKey{}
+
+	var alphaG1, betaG1, deltaG1 bn254.G1Affine
+	var betaG2, deltaG2 bn254.G2Affine
 
 	// 1. Read [α]₁
-	if err := decEvals.Decode(&vk.G1.Alpha); err != nil {
+	if err := decEvals.Decode(&alphaG1); err != nil {
 		return err
 	}
 
 	// 2. Read [β]₁
-	if err := decEvals.Decode(&vk.G1.Beta); err != nil {
+	if err := decEvals.Decode(&betaG1); err != nil {
 		return err
 	}
 
 	// 3. Read [β]₂
-	if err := decEvals.Decode(&vk.G2.Beta); err != nil {
+	if err := decEvals.Decode(&betaG2); err != nil {
 		return err
 	}
 
 	// 4. Set [γ]₂
 	_, _, _, gammaG2 := bn254.Generators()
-	vk.G2.Gamma.Set(&gammaG2)
 
 	// 5. Read [δ]₁
-	if err := decPh2.Decode(&vk.G1.Delta); err != nil {
+	if err := decPh2.Decode(&deltaG1); err != nil {
 		return err
 	}
 
 	// 6. Read [δ]₂
-	if err := decPh2.Decode(&vk.G2.Delta); err != nil {
+	if err := decPh2.Decode(&deltaG2); err != nil {
 		return err
 	}
 
@@ -305,25 +292,53 @@ func extractVK(phase2Path string) error {
 		return err
 	}
 	evalsReader.Reset(evalsFile)
-	if err := decEvals.Decode(&vk.G1.K); err != nil {
+	var vkK []bn254.G1Affine
+	if err := decEvals.Decode(&vkK); err != nil {
 		return err
 	}
 
-	// 8. Setup commitment key
+	// 8. Read and setup commitment keys to match R1CS structure
 	var ckk []bn254.G1Affine
 	if err := decEvals.Decode(&ckk); err != nil {
 		return err
 	}
-	// Convert to [][]G1Affine format expected by new API
-	ckkSlices := [][]bn254.G1Affine{ckk}
-	_, vk.CommitmentKey, err = pedersen.Setup(ckkSlices)
+
+	// Setup commitment keys to match R1CS structure
+	var commitmentKey pedersen.VerifyingKey
+	if len(ckk) > 0 {
+		// Convert to [][]G1Affine format expected by pedersen.Setup
+		ckkSlices := [][]bn254.G1Affine{ckk}
+		_, commitmentKey, err = pedersen.Setup(ckkSlices)
+		if err != nil {
+			return err
+		}
+	}
+
+	// Populate gnark VerifyingKey
+	vk.G1.Alpha.Set(&alphaG1)
+	vk.G1.Beta.Set(&betaG1)
+	vk.G1.Delta.Set(&deltaG1)
+	vk.G1.K = vkK
+
+	vk.G2.Beta.Set(&betaG2)
+	vk.G2.Delta.Set(&deltaG2)
+	vk.G2.Gamma.Set(&gammaG2)
+
+	// Set CommitmentKeys to match R1CS structure
+	if len(ckk) > 0 {
+		vk.CommitmentKeys = []pedersen.VerifyingKey{commitmentKey}
+	}
+
+	// Write to file in gnark's standard binary format
+	vkFile, err := os.Create("vk")
 	if err != nil {
 		return err
 	}
-	if _, err := vk.writeTo(vkWriter); err != nil {
-		return err
-	}
-	return nil
+	defer vkFile.Close()
+
+	// Write using WriteTo (compressed format, standard)
+	_, err = vk.WriteTo(vkFile)
+	return err
 }
 
 func ExtractKeys(phase2Path string) error {
@@ -376,6 +391,26 @@ func filterInfinityG1(buff []bn254.G1Affine) ([]bn254.G1Affine, []bool, uint64) 
 	return filtered[:j], infinityAt, uint64(len(buff) - j)
 }
 
+// reconstructG1WithInfinity reconstructs the full array from filtered array and infinity mask
+// This is the inverse of filterInfinityG1
+func reconstructG1WithInfinity(filtered []bn254.G1Affine, infinityMask []bool) []bn254.G1Affine {
+	full := make([]bn254.G1Affine, len(infinityMask))
+	j := 0
+	for i := range infinityMask {
+		if infinityMask[i] {
+			// Leave as infinity (zero value)
+			full[i].X.SetZero()
+			full[i].Y.SetZero()
+		} else {
+			if j < len(filtered) {
+				full[i] = filtered[j]
+				j++
+			}
+		}
+	}
+	return full
+}
+
 func filterInfinityG2(buff []bn254.G2Affine) ([]bn254.G2Affine, []bool, uint64) {
 	infinityAt := make([]bool, len(buff))
 	filtered := make([]bn254.G2Affine, len(buff))
@@ -389,5 +424,25 @@ func filterInfinityG2(buff []bn254.G2Affine) ([]bn254.G2Affine, []bool, uint64) 
 		j++
 	}
 	return filtered[:j], infinityAt, uint64(len(buff) - j)
+}
 
+// reconstructG2WithInfinity reconstructs the full array from filtered array and infinity mask
+func reconstructG2WithInfinity(filtered []bn254.G2Affine, infinityMask []bool) []bn254.G2Affine {
+	full := make([]bn254.G2Affine, len(infinityMask))
+	j := 0
+	for i := range infinityMask {
+		if infinityMask[i] {
+			// Leave as infinity (zero value)
+			full[i].X.A0.SetZero()
+			full[i].X.A1.SetZero()
+			full[i].Y.A0.SetZero()
+			full[i].Y.A1.SetZero()
+		} else {
+			if j < len(filtered) {
+				full[i] = filtered[j]
+				j++
+			}
+		}
+	}
+	return full
 }
