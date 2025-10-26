@@ -1,6 +1,6 @@
 module github.com/worldcoin/semaphore-mtb-setup
 
-go 1.24
+go 1.24.0
 
 require (
 	github.com/consensys/gnark v0.14.0
